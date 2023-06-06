@@ -1,13 +1,15 @@
 import os
 import sys
-
+import json
 import fire
 import gradio as gr
 import torch
 import transformers
 from peft import PeftModel
-from transformers import GenerationConfig, LlamaForCausalLM, LlamaTokenizer, AutoModel, AutoTokenizer, AutoModelForCausalLM
-
+from transformers import GenerationConfig, LlamaForCausalLM, LlamaTokenizer, AutoModel, AutoTokenizer, \
+    AutoModelForCausalLM
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pyngrok import ngrok
 from utils.callbacks import Iteratorize, Stream
 from utils.prompter import Prompter
 
@@ -19,17 +21,17 @@ else:
 try:
     if torch.backends.mps.is_available():
         device = "mps"
-except: 
+except:
     pass
 
 
 def main(
-    load_8bit: bool = False,
-    base_model: str = "",
-    lora_weights: str = "",
-    prompt_template: str = "",  # The prompt template to use, will default to alpaca.
-    server_name: str = "0.0.0.0",  # Allows to listen on all interfaces by providing '0.
-    share_gradio: bool = False,
+        load_8bit: bool = False,
+        base_model: str = "",
+        lora_weights: str = "",
+        prompt_template: str = "",  # The prompt template to use, will default to alpaca.
+        server_name: str = "0.0.0.0",  # Allows to listen on all interfaces by providing '0.
+        share_gradio: bool = False,
 ):
     base_model = base_model or os.environ.get("BASE_MODEL", "")
     assert (
@@ -52,7 +54,7 @@ def main(
                 torch_dtype=torch.float16,
             )
         except:
-            print("*"*50, "\n Attention! No Lora Weights \n", "*"*50)
+            print("*" * 50, "\n Attention! No Lora Weights \n", "*" * 50)
     elif device == "mps":
         model = LlamaForCausalLM.from_pretrained(
             base_model,
@@ -67,7 +69,7 @@ def main(
                 torch_dtype=torch.float16,
             )
         except:
-            print("*"*50, "\n Attention! No Lora Weights \n", "*"*50)
+            print("*" * 50, "\n Attention! No Lora Weights \n", "*" * 50)
     else:
         model = LlamaForCausalLM.from_pretrained(
             base_model, device_map={"": device}, low_cpu_mem_usage=True
@@ -79,7 +81,7 @@ def main(
                 device_map={"": device},
             )
         except:
-            print("*"*50, "\n Attention! No Lora Weights \n", "*"*50)
+            print("*" * 50, "\n Attention! No Lora Weights \n", "*" * 50)
 
     # unwind broken decapoda-research config
     model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
@@ -94,17 +96,17 @@ def main(
         model = torch.compile(model)
 
     def evaluate(
-        instruction,
-        # input=None,
-        temperature=0.1,
-        top_p=0.75,
-        top_k=40,
-        num_beams=4,
-        max_new_tokens=128,
-        stream_output=False,
-        **kwargs,
+            instruction,
+            # input=None,
+            temperature=0.1,
+            top_p=0.75,
+            top_k=40,
+            num_beams=4,
+            max_new_tokens=128,
+            stream_output=False,
+            **kwargs,
     ):
-        input=None
+        input = None
         prompt = prompter.generate_prompt(instruction, input)
         inputs = tokenizer(prompt, return_tensors="pt")
         input_ids = inputs["input_ids"].to(device)
@@ -170,41 +172,48 @@ def main(
         print(output)
         yield prompter.get_response(output)
 
-    gr.Interface(
-        fn=evaluate,
-        inputs=[
-            gr.components.Textbox(
-                lines=2,
-                label="Instruction",
-                placeholder="此处输入法律相关问题",
-            ),
-            # gr.components.Textbox(lines=2, label="Input", placeholder="none"),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=0.1, label="Temperature"
-            ),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=0.75, label="Top p"
-            ),
-            gr.components.Slider(
-                minimum=0, maximum=100, step=1, value=40, label="Top k"
-            ),
-            gr.components.Slider(
-                minimum=1, maximum=4, step=1, value=1, label="Beams"
-            ),
-            gr.components.Slider(
-                minimum=1, maximum=2000, step=1, value=256, label="Max tokens"
-            ),
-            gr.components.Checkbox(label="Stream output",  value=True),
-        ],
-        outputs=[
-            gr.inputs.Textbox(
-                lines=8,
-                label="Output",
-            )
-        ],
-        title="🦙🌲 LaWGPT",
-        description="",
-    ).queue().launch(server_name="0.0.0.0", share=share_gradio)
+    class MyHttpHander(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            data = {'code': 0, 'success': False, 'message': 'Not support get method'}
+            response = json.dumps(data)
+            self.wfile.write(response.encode())
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            path = self.path
+            if path != "/law-gpt/chat":
+                data = {'code': 0, 'success': False, 'message': 'No find this url'}
+                response = json.dumps(data)
+                self.wfile.write(response.encode())
+                return
+            content_length = int(self.headers["content-length"])
+            data = self.rfile.read(content_length)
+            data = data.decode("utf-8").replace("\r", "")
+            data = data.replace("\n", "")
+            data = data.replace("\t", "")
+            data = data.replace(" ", "")
+            data = json.loads(data)
+            message = data.get("message")
+            res = evaluate(message)
+            data = {'code': 1, 'success': True, 'message': '操作成功', 'data': res}
+            response = json.dumps(data)
+            self.wfile.write(response.encode())
+            return
+
+    os.environ["https_proxy"] = "http://192.168.2.69:7890"
+    httpserver = ThreadingHTTPServer(("", 8000), MyHttpHander)
+    httpserver.serve_forever()
+    public_url = ngrok.connect(8000).public_url
+    print(f'Serving HTTP on {public_url}')
+
+# 注册nacos
+# registerServer()
+
 
 
 if __name__ == "__main__":
